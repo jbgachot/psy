@@ -1,1 +1,13 @@
 @import 'tailwindcss';
+
+.text-xxs {
+	font-size: 0.5rem;
+	line-height: 0.5rem;
+}
+
+.vertical-label {
+	writing-mode: vertical-rl;
+	position: relative;
+	top: 50%;
+	transform: translateY(-50%) scale(-1);
+}
