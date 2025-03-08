@@ -1,106 +1,35 @@
-import { readable, type Readable } from 'svelte/store';
+// stores.ts
 
-export const cluster: Readable<{ [key: string]: any }> = readable({
-	'cluster-a': {
-		nodes: {
-			'node-1': {
-				size: 100,
-				pods: {
-					'pod-a': {
-						size: 50,
-						containers: {
-							'container-1': {
-								size: 50,
-								cpu: {
-									request: 1,
-									limit: 1
-								}
-							},
-							'container-2': {
-								size: 50,
-								cpu: {
-									request: 1,
-									limit: 1
-								}
-							}
-						}
-					},
-					'pod-b': {
-						size: 25,
-						containers: {
-							'container-1': {
-								size: 50,
-								cpu: {
-									request: 0.5,
-									limit: 0.5
-								}
-							},
-							'container-2': {
-								size: 50,
-								cpu: {
-									request: 0.5,
-									limit: 0.5
-								}
-							}
-						}
-					},
-					'pod-c': {
-						size: 25,
-						containers: {
-							'container-1': {
-								size: 75,
-								cpu: {
-									request: 0.75,
-									limit: 0.75
-								}
-							},
-							'container-2': {
-								size: 25,
-								cpu: {
-									request: 0.25,
-									limit: 0.25
-								}
-							}
-						}
-					}
-				}
-			},
-			'node-2': {
-				size: 50,
-				pods: {
-					'pod-a': {
-						size: 50,
-						containers: {
-							'container-1': {
-								size: 50,
-								cpu: {
-									request: 0.5,
-									limit: 0.5
-								}
-							},
-							'container-2': {
-								size: 50,
-								cpu: {
-									request: 0.5,
-									limit: 0.5
-								}
-							}
-						}
-					},
-					'pod-b': {
-						size: 25,
-						containers: {
-							'container-1': {
-								size: 100,
-								cpu: {
-									request: 0.5,
-									limit: 0.5
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-});
+import { writable } from 'svelte/store';
+
+interface CPU {
+    request: number;
+    limit: number;
+}
+
+interface Container {
+    size: number;
+    cpu: CPU;
+    labels?: Record<string, string>;
+    status?: string;
+    startDate?: string;
+}
+
+interface Pod {
+    size: number;
+    containers: { [key: string]: Container };
+}
+
+interface Node {
+    size: number;
+    pods: { [key: string]: Pod };
+}
+
+interface Cluster {
+    nodes: { [key: string]: Node };
+}
+
+const clusters = writable<{ [key: string]: Cluster }>({});
+
+export default clusters;
+export type { Cluster, Node, Pod, Container, CPU };

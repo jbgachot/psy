@@ -5,8 +5,9 @@
 	const { children } = $props();
 </script>
 
-<Header />
-
-<div class="p-5">
-	{@render children()}
+<div class="h-screen flex flex-col">
+	<Header />
+	<div class="flex-1 relative overflow-hidden">
+		{@render children()}
+	</div>
 </div>

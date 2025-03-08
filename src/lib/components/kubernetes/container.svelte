@@ -10,9 +10,14 @@
 	on:mouseenter={() =>
 		containerInfo.set({
 			name: containerName,
-			status: 'Created',
-			startDate: '2024-09-16 23h30',
-			visible: true
+			status: containerContent.status || 'Unknown',
+			startDate: containerContent.startDate || new Date().toISOString(),
+			visible: true,
+			cpu: {
+				request: containerContent.cpu.request,
+				limit: containerContent.cpu.limit
+			},
+			labels: containerContent.labels
 		})}
 	on:mouseleave={() => containerInfo.clear()}
 	class="relative"

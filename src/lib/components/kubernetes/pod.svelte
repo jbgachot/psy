@@ -8,7 +8,9 @@
 </script>
 
 <div class="relative" style="width: {podContent.size}%;">
-	<p class="absolute right-1.5 bottom-1 z-50 text-xxs text-indigo-900">
+	<p
+		class="max-w-[calc(100%-10px)] whitespace-nowrap overflow-hidden absolute right-1.5 bottom-1 z-50 text-xxs text-indigo-900"
+	>
 		{podName}
 	</p>
 	<div class="flex p-1 border-indigo-500 border-4 bg-indigo-400">
