@@ -1,199 +1,186 @@
 import type { PageServerLoad } from './$types';
 import { KubeConfig, CoreV1Api } from '@kubernetes/client-node';
-import clusters, { type Cluster, type Node, type Pod, type Container } from '$src/lib/stores/cluster';
+import type { V1Pod, V1Node, V1Container, V1ContainerStatus } from '@kubernetes/client-node';
+import type { Clusters, Container } from '$lib/types/kubernetes';
 
-export const load: PageServerLoad = async () => {
-	const kc = new KubeConfig();
-	kc.loadFromDefault();
-	const k8sApi = kc.makeApiClient(CoreV1Api);
+interface NodeCPUMap {
+	[key: string]: number;
+}
 
-	// Get current context name
-	const contextName = kc.getCurrentContext() || 'unknown-context';
+class KubernetesDataProcessor {
+	private nodeCPUCapacities: NodeCPUMap = {};
+	private maxNodeCPU = 0;
 
-	try {
-		// First, get nodes to ensure cluster access
-		const nodes = await k8sApi.listNode();
-		console.log('Nodes response type:', typeof nodes);
+	private parseCPU(cpu: string | undefined): number {
+		if (!cpu) return 0;
+		if (cpu.endsWith('m')) return parseInt(cpu) / 1000;
+		return parseInt(cpu) || 0;
+	}
 
-		if (!nodes?.items) {
-			console.error('Cannot access cluster - invalid nodes response');
-			return { clusters: {} };
-		}
-
-		// Get pods with proper error handling
-		const pods = await k8sApi.listPodForAllNamespaces();
-
-		if (!pods?.items) {
-			console.error('No items in pods response');
-			return { clusters: {} };
-		}
-
-		const podsItems = pods.items || [];
-		const nodesItems = nodes.items || [];
-
-		// Filter only running pods
-		const runningPodsItems = podsItems.filter(pod =>
-			pod.status?.phase === 'Running' &&
-			pod.status?.containerStatuses?.every(status => status.ready)
-		);
-
-		console.log('API Response:', {
-			totalPodsCount: podsItems.length,
-			runningPodsCount: runningPodsItems.length,
-			nodesCount: nodesItems.length
-		});
-
-		// Find maximum node CPU capacity
-		const nodeCPUCapacities: { [key: string]: number } = {};
-		let maxNodeCPU = 0;
-
-		// First pass: get all CPU capacities and find max
-		nodesItems.forEach(node => {
+	private processNodeCapacities(nodes: V1Node[]): void {
+		nodes.forEach(node => {
 			if (!node?.metadata?.name) return;
-			const nodeName = node.metadata.name;
-			const allocatable = node.status?.allocatable || {};
-			const cpuCapacity = parseCPU(allocatable.cpu);
-			nodeCPUCapacities[nodeName] = cpuCapacity;
-			maxNodeCPU = Math.max(maxNodeCPU, cpuCapacity);
+			const cpuCapacity = this.parseCPU(node.status?.allocatable?.cpu);
+			this.nodeCPUCapacities[node.metadata.name] = cpuCapacity;
+			this.maxNodeCPU = Math.max(this.maxNodeCPU, cpuCapacity);
 		});
+	}
 
-		// Create cluster structure with context name
-		const clusterData: { [key: string]: Cluster } = {
-			[contextName]: {
-				nodes: {}
-			}
-		};
+	private calculateNodeSizes(nodes: V1Node[], contextName: string): Clusters {
+		const clusters: Clusters = { [contextName]: { nodes: {} } };
 
-		// Second pass: calculate relative node sizes
-		nodesItems.forEach(node => {
+		nodes.forEach(node => {
 			if (!node?.metadata?.name) return;
-			const nodeName = node.metadata.name;
-			const nodeCapacity = nodeCPUCapacities[nodeName];
+			const nodeCapacity = this.nodeCPUCapacities[node.metadata.name];
 
-			clusterData[contextName].nodes[nodeName] = {
-				size: (nodeCapacity / maxNodeCPU) * 100, // Relative to largest node
+			clusters[contextName].nodes[node.metadata.name] = {
+				size: (nodeCapacity / this.maxNodeCPU) * 100,
 				pods: {}
 			};
 		});
 
-		// Track total pod CPU requests per node to calculate accurate percentages
-		const nodeTotalRequests: { [key: string]: number } = {};
+		return clusters;
+	}
 
-		// First pass: calculate total CPU requests per node from running pods
-		runningPodsItems.forEach(pod => {
-			const nodeName = pod.spec?.nodeName;
-			if (!nodeName) return;
+	private processContainerStatus(
+		container: V1Container,
+		containerStatus: V1ContainerStatus | undefined,
+		podLabels: Record<string, string> = {}
+	): Container {
+		const cpuRequest = this.parseCPU(container.resources?.requests?.cpu);
+		const cpuLimit = this.parseCPU(container.resources?.limits?.cpu);
+		const startDate = containerStatus?.state?.running?.startedAt
+			? new Date(containerStatus.state.running.startedAt).toISOString()
+			: '';
 
-			nodeTotalRequests[nodeName] = nodeTotalRequests[nodeName] || 0;
+		return {
+			size: 0, // Will be calculated later
+			cpu: { request: cpuRequest, limit: cpuLimit },
+			labels: podLabels,
+			status: this.determineContainerStatus(containerStatus),
+			startDate
+		};
+	}
 
-			pod.spec?.containers.forEach(container => {
-				const containerStatus = pod.status?.containerStatuses?.find(
-					status => status.name === container.name
-				);
+	private determineContainerStatus(status: V1ContainerStatus | undefined): Container['status'] {
+		if (!status) return undefined;
+		if (status.state?.running) return 'Started';
+		if (status.state?.waiting) return status.state.waiting.reason as Container['status'];
+		if (status.state?.terminated) return status.state.terminated.reason as Container['status'];
+		return undefined;
+	}
 
-				// Skip if container is not ready
-				if (!containerStatus?.ready) return;
+	public async processClusterData(contextName: string): Promise<Clusters> {
+		const kc = new KubeConfig();
+		kc.loadFromDefault();
+		const k8sApi = kc.makeApiClient(CoreV1Api);
 
-				const cpuRequest = parseCPU(container.resources?.requests?.cpu);
-				nodeTotalRequests[nodeName] += cpuRequest;
-			});
-		});
+		try {
+			const [{ items: nodes }, { items: pods }] = await Promise.all([
+				k8sApi.listNode(),
+				k8sApi.listPodForAllNamespaces()
+			]);
 
-		// Process running pods only
-		runningPodsItems.forEach(pod => {
-			try {
-				const nodeName = pod.spec?.nodeName;
-				const podName = pod.metadata?.name;
-				const namespace = pod.metadata?.namespace;
-
-				if (!nodeName || !podName || !namespace) {
-					console.warn('Skipping pod with missing required fields:', { nodeName, podName, namespace });
-					return;
-				}
-
-				if (!clusterData[contextName].nodes[nodeName]) {
-					console.warn(`Node ${nodeName} not found for pod ${podName}`);
-					return;
-				}
-
-				const podContainers: { [key: string]: Container } = {};
-				let totalPodCPU = 0;
-
-				// Process only running containers
-				pod.spec?.containers.forEach(container => {
-					const containerStatus = pod.status?.containerStatuses?.find(
-						status => status.name === container.name
-					);
-
-					// Skip if container is not ready
-					if (!containerStatus?.ready) return;
-
-					const cpuRequest = parseCPU(container.resources?.requests?.cpu);
-					const cpuLimit = parseCPU(container.resources?.limits?.cpu);
-					totalPodCPU += cpuRequest;
-
-					podContainers[container.name] = {
-						size: 0,
-						cpu: {
-							request: cpuRequest,
-							limit: cpuLimit
-						},
-						labels: pod.metadata?.labels || {},
-						status: containerStatus?.state?.running ? 'Started'
-							: containerStatus?.state?.waiting ? containerStatus.state.waiting.reason
-								: containerStatus?.state?.terminated ? containerStatus.state.terminated.reason
-									: 'Unknown',
-						startDate: containerStatus?.state?.running?.startedAt || pod.status?.startTime || ''
-					};
+			if (!nodes?.length || !pods?.length) {
+				console.warn('No resources found:', {
+					nodesCount: nodes?.length ?? 0,
+					podsCount: pods?.length ?? 0
 				});
-
-				if (totalPodCPU > 0) {
-					// Calculate container sizes as percentage of pod's total CPU
-					Object.keys(podContainers).forEach(containerName => {
-						const container = podContainers[containerName];
-						container.size = (container.cpu.request / totalPodCPU) * 100;
-					});
-
-					// Calculate pod size as percentage of node capacity
-					const nodeCPU = nodeCPUCapacities[nodeName] || 1;
-					const podSize = (totalPodCPU / nodeCPU) * 100;
-
-					// Log overcommitted nodes
-					if (nodeTotalRequests[nodeName] > nodeCPU) {
-						console.warn(`Node ${nodeName} is overcommitted: ${nodeTotalRequests[nodeName]}/${nodeCPU} CPU cores`);
-					}
-
-					clusterData[contextName].nodes[nodeName].pods[podName] = {
-						size: podSize,
-						containers: podContainers
-					};
-				}
-			} catch (podError) {
-				console.error('Error processing pod:', podError);
+				return { [contextName]: { nodes: {} } };
 			}
+
+			const runningPods = pods.filter(pod =>
+				pod.status?.phase === 'Running' &&
+				pod.status?.containerStatuses?.every(status => status.ready)
+			);
+
+			this.processNodeCapacities(nodes);
+			const clusters = this.calculateNodeSizes(nodes, contextName);
+
+			// Process pods and add them to the cluster data
+			runningPods.forEach(pod => this.processPod(pod, clusters[contextName]));
+
+			return clusters;
+		} catch (error) {
+			console.error('Failed to process cluster data:', {
+				error: error instanceof Error ? error.message : 'Unknown error',
+				context: contextName
+			});
+			throw error;
+		}
+	}
+
+	private processPod(pod: V1Pod, cluster: Clusters[string]): void {
+		const nodeName = pod.spec?.nodeName;
+		const podName = pod.metadata?.name;
+
+		if (!nodeName || !podName || !cluster.nodes[nodeName]) return;
+
+		const podContainers: Record<string, Container> = {};
+		let totalPodCPU = 0;
+
+		pod.spec?.containers.forEach(container => {
+			const containerStatus = pod.status?.containerStatuses?.find(
+				status => status.name === container.name
+			);
+
+			if (!containerStatus?.ready) return;
+
+			const containerData = this.processContainerStatus(
+				container,
+				containerStatus,
+				pod.metadata?.labels
+			);
+
+			totalPodCPU += containerData.cpu.request;
+			podContainers[container.name] = containerData;
 		});
 
-		clusters.set(clusterData);
-		return { clusters: clusterData };
-	} catch (err) {
-		console.error('Error fetching cluster data:', err);
-		if (err.response) {
-			console.error('Response error:', {
-				status: err.response.statusCode,
-				body: JSON.stringify(err.response.body, null, 2)
-			});
-		} else {
-			console.error('Error details:', err.message);
+		if (totalPodCPU > 0) {
+			this.calculateContainerSizes(podContainers, totalPodCPU);
+			this.addPodToNode(
+				cluster.nodes[nodeName],
+				podName,
+				totalPodCPU,
+				podContainers,
+				nodeName
+			);
 		}
+	}
+
+	private calculateContainerSizes(
+		containers: Record<string, Container>,
+		totalPodCPU: number
+	): void {
+		Object.values(containers).forEach(container => {
+			container.size = (container.cpu.request / totalPodCPU) * 100;
+		});
+	}
+
+	private addPodToNode(
+		node: Clusters[string]['nodes'][string],
+		podName: string,
+		totalPodCPU: number,
+		containers: Record<string, Container>,
+		nodeName: string
+	): void {
+		const nodeCPU = this.nodeCPUCapacities[nodeName] || 1;
+		node.pods[podName] = {
+			size: (totalPodCPU / nodeCPU) * 100,
+			containers
+		};
+	}
+}
+
+export const load: PageServerLoad = async () => {
+	const contextName = new KubeConfig().getCurrentContext() || 'unknown-context';
+
+	try {
+		const processor = new KubernetesDataProcessor();
+		const clusters = await processor.processClusterData(contextName);
+		return { clusters };
+	} catch (error) {
+		console.error('Error in page load:', error);
 		return { clusters: {} };
 	}
 };
-
-// Helper function to parse CPU values
-function parseCPU(cpu: string | undefined): number {
-	if (!cpu) return 0;
-	if (cpu.endsWith('m')) {
-		return parseInt(cpu) / 1000;
-	}
-	return parseInt(cpu) || 0;
-}
