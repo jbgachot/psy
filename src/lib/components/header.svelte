@@ -17,9 +17,6 @@
 			<li class={navUlLiClasses} class:bg-indigo-700={$page.url.pathname === '/'}>
 				<a href="/">Home</a>
 			</li>
-			<li class={navUlLiClasses} class:bg-indigo-700={$page.url.pathname === '/about'}>
-				<a href="/about">About</a>
-			</li>
 		</ul>
 	</nav>
 
